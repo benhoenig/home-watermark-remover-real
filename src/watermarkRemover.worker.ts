@@ -5,10 +5,15 @@ import * as tf from '@tensorflow/tfjs';
 
 // Constants for model configuration
 const MODEL_CONFIG = {
-  INITIAL_FILTERS: 16,
-  KERNEL_SIZE: 3,
+  INITIAL_FILTERS: 64,
+  KERNEL_SIZE: 5,
   MIN_DIMENSION: 32,
-  MAX_DIMENSION: 4096
+  MAX_DIMENSION: 4096,
+  QUALITY_SETTINGS: {
+    high: {
+      dil
+    }
+  }
 } as const;
 
 let model: tf.LayersModel | null = null;

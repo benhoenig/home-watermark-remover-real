@@ -44,17 +44,27 @@ function App() {
       'image/png': [],
       'image/webp': []
     },
-    multiple: true
+    multiple: true,
+    maxFiles: 50,
+    validator: (file) => {
+      if (images.length >= 50) {
+        return {
+          code: 'too-many-files',
+          message: 'Maximum 50 images allowed'
+        };
+      }
+      return null;
+    }
   })
 
   // Process images to remove watermarks
   const processImages = async () => {
-    if (!modelLoaded || images.length === 0) return
+    if (!modelLoaded || images.length === 0) return;
     
-    setProcessing(true)
-    setProgress(0)
+    setProcessing(true);
+    setProgress(0);
     
-    // Process images sequentially
+    // Process images sequentially with high quality
     const imagesToProcess = images.filter((img: ImageFile) => img.status === 'idle');
     
     for (let i = 0; i < imagesToProcess.length; i++) {
@@ -68,25 +78,24 @@ function App() {
               ? { ...img, status: 'processing' } 
               : img
           )
-        )
+        );
 
-        // Convert file to ImageData for processing
+        // Process with high quality settings
         const imageData = await fileToImageData(image.file);
-        
-        // Process the image using our web worker
         await new Promise<void>((resolve) => {
           processImage({
             id: image.id,
             imageData,
-            onComplete: (result: { success: boolean; imageData?: ImageData; error?: string }) => {
+            quality: 'high',
+            onComplete: (result) => {
               if (result.success && result.imageData) {
-                // Convert processed ImageData back to data URL
+                // Preserve original quality
                 const dataURL = imageDataToDataURL(
                   result.imageData,
-                  getFileType(image.file)
+                  getFileType(image.file),
+                  1.0
                 );
                 
-                // Update image with processed result
                 setImages((prev: ImageFile[]) => 
                   prev.map((img: ImageFile) => 
                     img.id === image.id 
@@ -95,7 +104,6 @@ function App() {
                   )
                 );
               } else {
-                // Handle error
                 console.error(`Error processing image ${image.id}:`, result.error);
                 setImages((prev: ImageFile[]) => 
                   prev.map((img: ImageFile) => 
@@ -120,35 +128,35 @@ function App() {
         );
       }
 
-      // Update progress
       setProgress(Math.round(((i + 1) / imagesToProcess.length) * 100));
     }
     
     setProcessing(false);
-  }
+  };
 
-  // Download all processed images
+  // Download all processed images with original quality
   const downloadImages = async () => {
-    const zip = new JSZip()
-    const processedImages = images.filter((img: ImageFile) => img.status === 'done')
+    const zip = new JSZip();
+    const processedImages = images.filter((img: ImageFile) => img.status === 'done');
     
-    if (processedImages.length === 0) return
+    if (processedImages.length === 0) return;
     
-    // Add each processed image to the zip file
     for (const img of processedImages) {
       try {
-        const response = await fetch(img.processed!)
-        const blob = await response.blob()
-        zip.file(img.file.name, blob)
+        const response = await fetch(img.processed!);
+        const blob = await response.blob();
+        zip.file(img.file.name, blob);
       } catch (error) {
-        console.error('Error adding file to zip:', error)
+        console.error('Error adding file to zip:', error);
       }
     }
     
-    // Generate and download the zip file
-    const content = await zip.generateAsync({ type: 'blob' })
-    saveAs(content, 'processed-images.zip')
-  }
+    const content = await zip.generateAsync({ 
+      type: 'blob',
+      compression: 'STORE'
+    });
+    saveAs(content, 'processed-images.zip');
+  };
 
   // Remove an image from the list
   const removeImage = (id: string) => {

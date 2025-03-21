@@ -117,19 +117,24 @@ export const imageToImageData = (img: HTMLImageElement): ImageData => {
 export const imageDataToDataURL = (
   imageData: ImageData,
   type: SupportedImageType = 'image/png',
-  quality: number = IMAGE_CONFIG.DEFAULT_QUALITY
+  quality: number = 1.0 // Default to maximum quality
 ): string => {
-  validateImageType(type);
-  validateImageDimensions(imageData.width, imageData.height);
-  
   const canvas = document.createElement('canvas');
   canvas.width = imageData.width;
   canvas.height = imageData.height;
   
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const ctx = canvas.getContext('2d', { 
+    willReadFrequently: true,
+    alpha: true // Preserve alpha channel
+  });
+  
   if (!ctx) {
     throw new Error('Could not get 2D context from canvas');
   }
+  
+  // Enable high-quality image rendering
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
   
   ctx.putImageData(imageData, 0, 0);
   return canvas.toDataURL(type, quality);
