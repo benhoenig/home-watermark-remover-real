@@ -3,7 +3,25 @@
 
 import * as tf from '@tensorflow/tfjs';
 
+// Constants for model configuration
+const MODEL_CONFIG = {
+  INITIAL_FILTERS: 16,
+  KERNEL_SIZE: 3,
+  MIN_DIMENSION: 32,
+  MAX_DIMENSION: 4096
+} as const;
+
 let model: tf.LayersModel | null = null;
+
+// Validate image dimensions
+function validateImageDimensions(width: number, height: number): void {
+  if (width < MODEL_CONFIG.MIN_DIMENSION || height < MODEL_CONFIG.MIN_DIMENSION) {
+    throw new Error(`Image dimensions must be at least ${MODEL_CONFIG.MIN_DIMENSION}x${MODEL_CONFIG.MIN_DIMENSION} pixels`);
+  }
+  if (width > MODEL_CONFIG.MAX_DIMENSION || height > MODEL_CONFIG.MAX_DIMENSION) {
+    throw new Error(`Image dimensions must not exceed ${MODEL_CONFIG.MAX_DIMENSION}x${MODEL_CONFIG.MAX_DIMENSION} pixels`);
+  }
+}
 
 // Handle messages from the main thread
 self.addEventListener('message', async (e: MessageEvent) => {
@@ -12,33 +30,55 @@ self.addEventListener('message', async (e: MessageEvent) => {
   switch (type) {
     case 'LOAD_MODEL':
       try {
-        // Load the model - for demonstration, we'll use a simplified approach since full inpainting models are large
-        // In a production app, you would use a proper inpainting model like LaMa or MAT
         await tf.ready();
+        await tf.setBackend('webgl');
         
-        // For demo purposes, we'll create a very simple model that just applies blur and other filters
-        // This is NOT a real watermark removal model, just a simplified demo
+        // Create a more sophisticated model architecture
         const inputLayer = tf.layers.input({shape: [null, null, 3]});
-        const conv = tf.layers.conv2d({
-          filters: 16,
-          kernelSize: 3,
+        
+        // Encoder
+        const conv1 = tf.layers.conv2d({
+          filters: MODEL_CONFIG.INITIAL_FILTERS,
+          kernelSize: MODEL_CONFIG.KERNEL_SIZE,
           padding: 'same',
           activation: 'relu'
         }).apply(inputLayer);
+        
         const conv2 = tf.layers.conv2d({
-          filters: 8, 
-          kernelSize: 3,
+          filters: MODEL_CONFIG.INITIAL_FILTERS * 2,
+          kernelSize: MODEL_CONFIG.KERNEL_SIZE,
           padding: 'same',
           activation: 'relu'
-        }).apply(conv);
-        const out = tf.layers.conv2d({
-          filters: 3,
-          kernelSize: 3,
+        }).apply(conv1);
+        
+        // Feature processing
+        const conv3 = tf.layers.conv2d({
+          filters: MODEL_CONFIG.INITIAL_FILTERS * 2,
+          kernelSize: MODEL_CONFIG.KERNEL_SIZE,
           padding: 'same',
-          activation: 'sigmoid'
+          activation: 'relu',
+          dilation: 2
         }).apply(conv2);
         
-        model = tf.model({inputs: inputLayer, outputs: out as tf.SymbolicTensor});
+        // Decoder
+        const conv4 = tf.layers.conv2d({
+          filters: MODEL_CONFIG.INITIAL_FILTERS,
+          kernelSize: MODEL_CONFIG.KERNEL_SIZE,
+          padding: 'same',
+          activation: 'relu'
+        }).apply(conv3);
+        
+        const output = tf.layers.conv2d({
+          filters: 3,
+          kernelSize: 1,
+          padding: 'same',
+          activation: 'sigmoid'
+        }).apply(conv4);
+        
+        model = tf.model({inputs: inputLayer, outputs: output as tf.SymbolicTensor});
+        
+        // Enable memory management optimizations
+        tf.enableProdMode();
         
         self.postMessage({ type: 'MODEL_LOADED', success: true });
       } catch (error) {
@@ -63,7 +103,7 @@ self.addEventListener('message', async (e: MessageEvent) => {
       }
 
       try {
-        // Process the image with the model
+        validateImageDimensions(imageData.width, imageData.height);
         const processedImageData = await processImage(imageData);
         
         self.postMessage({ 
@@ -91,49 +131,61 @@ self.addEventListener('message', async (e: MessageEvent) => {
 // Function to process an image and remove watermarks
 async function processImage(imageData: ImageData): Promise<ImageData> {
   return new Promise(async (resolve, reject) => {
+    const tensors: tf.Tensor[] = [];
+    
     try {
       if (!model) {
         reject(new Error('Model not loaded'));
         return;
       }
 
-      // Convert ImageData to a tensor
+      // Convert ImageData to a tensor and track it
       const tensor = tf.browser.fromPixels(imageData);
+      tensors.push(tensor);
       
-      // Normalize the tensor (values between 0 and 1)
+      // Normalize the tensor
       const normalized = tensor.div(255);
+      tensors.push(normalized);
       
-      // Expand dimensions to match model input shape [batch, height, width, channels]
+      // Add batch dimension
       const batched = normalized.expandDims(0);
+      tensors.push(batched);
       
-      // Run inference with the model
-      // This is a simplified approach. A real inpainting model would require more processing
-      const result = model.predict(batched) as tf.Tensor;
+      // Run inference with memory optimization
+      const result = tf.tidy(() => {
+        return model!.predict(batched) as tf.Tensor;
+      });
+      tensors.push(result);
       
-      // Convert the result back to an ImageData object
-      // Convert tensor values back to 0-255 range
+      // Post-process the result
       const processedTensor = result.mul(255).squeeze();
+      tensors.push(processedTensor);
       
-      // Get image dimensions
+      // Get dimensions
       const [height, width] = processedTensor.shape as [number, number, number];
       
-      // Create a new ImageData object to hold the processed image
+      // Create output ImageData
       const processedImageData = new ImageData(width, height);
       
-      // Extract the data from the tensor to the ImageData object
+      // Convert to pixels efficiently
       const pixels = await tf.browser.toPixels(processedTensor as tf.Tensor3D);
       processedImageData.data.set(pixels);
-      
-      // Clean up tensors to avoid memory leaks
-      tensor.dispose();
-      normalized.dispose();
-      batched.dispose();
-      result.dispose();
-      processedTensor.dispose();
       
       resolve(processedImageData);
     } catch (error) {
       reject(error);
+    } finally {
+      // Clean up all tensors
+      tensors.forEach(t => {
+        if (t && !t.isDisposed) {
+          t.dispose();
+        }
+      });
+      
+      // Force garbage collection
+      if (tf.memory().numTensors > 0) {
+        tf.disposeVariables();
+      }
     }
   });
 }

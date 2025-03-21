@@ -2,16 +2,84 @@
  * Utility functions for image processing
  */
 
+// Constants for image processing
+const IMAGE_CONFIG = {
+  MAX_DIMENSION: 4096,
+  MIN_DIMENSION: 32,
+  DEFAULT_QUALITY: 0.8,
+  SUPPORTED_TYPES: ['image/jpeg', 'image/png', 'image/webp'] as const
+} as const;
+
+type SupportedImageType = typeof IMAGE_CONFIG.SUPPORTED_TYPES[number];
+
+interface ImageDimensions {
+  width: number;
+  height: number;
+}
+
+/**
+ * Validates image dimensions
+ * @param width Image width
+ * @param height Image height
+ * @throws Error if dimensions are invalid
+ */
+export const validateImageDimensions = (width: number, height: number): void => {
+  if (width < IMAGE_CONFIG.MIN_DIMENSION || height < IMAGE_CONFIG.MIN_DIMENSION) {
+    throw new Error(`Image dimensions must be at least ${IMAGE_CONFIG.MIN_DIMENSION}x${IMAGE_CONFIG.MIN_DIMENSION} pixels`);
+  }
+  if (width > IMAGE_CONFIG.MAX_DIMENSION || height > IMAGE_CONFIG.MAX_DIMENSION) {
+    throw new Error(`Image dimensions must not exceed ${IMAGE_CONFIG.MAX_DIMENSION}x${IMAGE_CONFIG.MAX_DIMENSION} pixels`);
+  }
+};
+
+/**
+ * Validates image type
+ * @param type Image MIME type
+ * @throws Error if type is not supported
+ */
+export const validateImageType = (type: string): void => {
+  if (!IMAGE_CONFIG.SUPPORTED_TYPES.includes(type as SupportedImageType)) {
+    throw new Error(`Unsupported image type: ${type}. Supported types are: ${IMAGE_CONFIG.SUPPORTED_TYPES.join(', ')}`);
+  }
+};
+
+/**
+ * Gets image dimensions from a File object
+ * @param file The image file
+ * @returns Promise resolving to image dimensions
+ */
+export const getImageDimensions = (file: File): Promise<ImageDimensions> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      resolve({ width: img.width, height: img.height });
+      URL.revokeObjectURL(img.src); // Clean up
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(img.src); // Clean up
+      reject(new Error('Failed to load image'));
+    };
+    img.src = URL.createObjectURL(file);
+  });
+};
+
 /**
  * Converts a File object to an HTMLImageElement
  * @param file The image file to convert
  * @returns A promise that resolves to an HTMLImageElement
  */
-export const fileToImage = (file: File): Promise<HTMLImageElement> => {
+export const fileToImage = async (file: File): Promise<HTMLImageElement> => {
+  validateImageType(file.type);
+  const dimensions = await getImageDimensions(file);
+  validateImageDimensions(dimensions.width, dimensions.height);
+
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);
-    img.onerror = (e) => reject(e);
+    img.onerror = () => {
+      URL.revokeObjectURL(img.src);
+      reject(new Error('Failed to load image'));
+    };
     img.src = URL.createObjectURL(file);
   });
 };
@@ -26,10 +94,14 @@ export const imageToImageData = (img: HTMLImageElement): ImageData => {
   canvas.width = img.width;
   canvas.height = img.height;
   
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) {
     throw new Error('Could not get 2D context from canvas');
   }
+  
+  // Use high-quality image rendering
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
   
   ctx.drawImage(img, 0, 0);
   return ctx.getImageData(0, 0, img.width, img.height);
@@ -43,15 +115,18 @@ export const imageToImageData = (img: HTMLImageElement): ImageData => {
  * @returns A data URL string representing the image
  */
 export const imageDataToDataURL = (
-  imageData: ImageData, 
-  type: string = 'image/png',
-  quality: number = 0.8
+  imageData: ImageData,
+  type: SupportedImageType = 'image/png',
+  quality: number = IMAGE_CONFIG.DEFAULT_QUALITY
 ): string => {
+  validateImageType(type);
+  validateImageDimensions(imageData.width, imageData.height);
+  
   const canvas = document.createElement('canvas');
   canvas.width = imageData.width;
   canvas.height = imageData.height;
   
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) {
     throw new Error('Could not get 2D context from canvas');
   }
@@ -78,16 +153,23 @@ export const fileToImageData = async (file: File): Promise<ImageData> => {
 export const dataURLToBlob = (dataURL: string): Blob => {
   const arr = dataURL.split(',');
   if (arr.length < 2) {
-    throw new Error('Invalid data URL');
+    throw new Error('Invalid data URL format');
   }
   
-  const mime = arr[0].match(/:(.*?);/)?.[1];
+  const mimeMatch = arr[0].match(/:(.*?);/);
+  if (!mimeMatch) {
+    throw new Error('Invalid data URL format: missing MIME type');
+  }
+  
+  const mime = mimeMatch[1];
+  validateImageType(mime);
+  
   const bstr = atob(arr[1]);
-  let n = bstr.length;
+  const n = bstr.length;
   const u8arr = new Uint8Array(n);
   
-  while (n--) {
-    u8arr[n] = bstr.charCodeAt(n);
+  for (let i = 0; i < n; i++) {
+    u8arr[i] = bstr.charCodeAt(i);
   }
   
   return new Blob([u8arr], { type: mime });
@@ -98,6 +180,8 @@ export const dataURLToBlob = (dataURL: string): Blob => {
  * @param file The file to check
  * @returns The MIME type string
  */
-export const getFileType = (file: File): string => {
-  return file.type || 'image/png';
+export const getFileType = (file: File): SupportedImageType => {
+  const type = file.type || 'image/png';
+  validateImageType(type);
+  return type as SupportedImageType;
 }; 
