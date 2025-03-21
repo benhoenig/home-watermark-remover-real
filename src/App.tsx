@@ -1,182 +1,274 @@
-import { useState, useCallback, useEffect } from 'react'
-import { useDropzone } from 'react-dropzone'
+import { useState, useCallback, useEffect, useMemo } from 'react'
+import { useDropzone, FileRejection } from 'react-dropzone'
 import JSZip from 'jszip'
 import { saveAs } from 'file-saver'
 import './App.css'
 import useWatermarkRemover from './hooks/useWatermarkRemover'
-import { fileToImageData, imageDataToDataURL, getFileType } from './utils/imageUtils'
+import { fileToImageData, imageDataToDataURL, getFileType, validateImageType } from './utils/imageUtils'
+
+// Constants
+const MAX_FILES = 50
+const SUPPORTED_FORMATS = {
+  'image/jpeg': [],
+  'image/png': [],
+  'image/webp': []
+} as const
+
+// Types
+type ImageStatus = 'idle' | 'processing' | 'done' | 'error'
 
 interface ImageFile {
   id: string;
   file: File;
   preview: string;
   processed?: string;
-  status: 'idle' | 'processing' | 'done' | 'error';
+  status: ImageStatus;
+  error?: string;
+}
+
+interface ProcessingError {
+  message: string;
+  details?: string;
 }
 
 function App() {
   const [images, setImages] = useState<ImageFile[]>([])
   const [processing, setProcessing] = useState(false)
   const [progress, setProgress] = useState(0)
+  const [error, setError] = useState<ProcessingError | null>(null)
 
   // Use our custom hook for watermark removal
   const { processImage, modelLoaded, loading: modelLoading, error: modelError } = useWatermarkRemover({
-    onModelLoaded: () => console.log('Model loaded successfully'),
-    onError: (error) => console.error('Model loading error:', error)
-  });
+    onModelLoaded: () => {
+      console.log('Model loaded successfully')
+      setError(null)
+    },
+    onError: (error) => {
+      console.error('Model loading error:', error)
+      setError({ message: 'Failed to load AI model', details: error })
+    }
+  })
+
+  // Memoized values
+  const processedCount = useMemo(() => 
+    images.filter(img => img.status === 'done').length,
+    [images]
+  )
+
+  const hasErrors = useMemo(() => 
+    images.some(img => img.status === 'error'),
+    [images]
+  )
 
   // Handle file drop
-  const onDrop = useCallback((acceptedFiles: File[]) => {
-    const newImages = acceptedFiles.map(file => ({
-      id: Math.random().toString(36).substring(2, 11),
-      file,
-      preview: URL.createObjectURL(file),
-      status: 'idle' as const
-    }))
-    
-    setImages((prev: ImageFile[]) => [...prev, ...newImages])
-  }, [])
+  const onDrop = useCallback((acceptedFiles: File[], rejectedFiles: FileRejection[]) => {
+    // Handle rejected files
+    if (rejectedFiles.length > 0) {
+      const errors = rejectedFiles.map(rejection => 
+        `${rejection.file.name}: ${rejection.errors[0].message}`
+      )
+      setError({ 
+        message: 'Some files were rejected', 
+        details: errors.join('\n') 
+      })
+      return
+    }
+
+    // Validate total file count
+    if (images.length + acceptedFiles.length > MAX_FILES) {
+      setError({ 
+        message: `Maximum ${MAX_FILES} images allowed`,
+        details: `You tried to add ${acceptedFiles.length} files but only ${MAX_FILES - images.length} slots remaining`
+      })
+      return
+    }
+
+    try {
+      // Create new image entries
+      const newImages = acceptedFiles.map(file => {
+        validateImageType(file.type)
+        return {
+          id: crypto.randomUUID(),
+          file,
+          preview: URL.createObjectURL(file),
+          status: 'idle' as const
+        }
+      })
+      
+      setImages(prev => [...prev, ...newImages])
+      setError(null)
+    } catch (err) {
+      setError({ 
+        message: 'Error adding images',
+        details: err instanceof Error ? err.message : 'Unknown error'
+      })
+    }
+  }, [images.length])
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    accept: {
-      'image/jpeg': [],
-      'image/png': [],
-      'image/webp': []
-    },
+    accept: SUPPORTED_FORMATS,
     multiple: true,
-    maxFiles: 50,
+    maxFiles: MAX_FILES,
     validator: (file) => {
-      if (images.length >= 50) {
+      if (images.length >= MAX_FILES) {
         return {
           code: 'too-many-files',
-          message: 'Maximum 50 images allowed'
-        };
+          message: `Maximum ${MAX_FILES} images allowed`
+        }
       }
-      return null;
+      return null
     }
   })
 
   // Process images to remove watermarks
   const processImages = async () => {
-    if (!modelLoaded || images.length === 0) return;
+    if (!modelLoaded || images.length === 0) return
     
-    setProcessing(true);
-    setProgress(0);
+    setProcessing(true)
+    setProgress(0)
+    setError(null)
     
-    // Process images sequentially with high quality
-    const imagesToProcess = images.filter((img: ImageFile) => img.status === 'idle');
+    const imagesToProcess = images.filter(img => img.status === 'idle')
+    let processed = 0
     
-    for (let i = 0; i < imagesToProcess.length; i++) {
-      const image = imagesToProcess[i];
-      
-      try {
-        // Update status to processing
-        setImages((prev: ImageFile[]) => 
-          prev.map((img: ImageFile) => 
-            img.id === image.id 
-              ? { ...img, status: 'processing' } 
-              : img
+    try {
+      for (const image of imagesToProcess) {
+        try {
+          // Update status to processing
+          setImages(prev => 
+            prev.map(img => 
+              img.id === image.id 
+                ? { ...img, status: 'processing' } 
+                : img
+            )
           )
-        );
 
-        // Process with high quality settings
-        const imageData = await fileToImageData(image.file);
-        await new Promise<void>((resolve) => {
-          processImage({
-            id: image.id,
-            imageData,
-            quality: 'high',
-            onComplete: (result) => {
-              if (result.success && result.imageData) {
-                // Preserve original quality
-                const dataURL = imageDataToDataURL(
-                  result.imageData,
-                  getFileType(image.file),
-                  1.0
-                );
-                
-                setImages((prev: ImageFile[]) => 
-                  prev.map((img: ImageFile) => 
-                    img.id === image.id 
-                      ? { ...img, processed: dataURL, status: 'done' } 
-                      : img
+          // Process image
+          const imageData = await fileToImageData(image.file)
+          await new Promise<void>((resolve, reject) => {
+            processImage({
+              id: image.id,
+              imageData,
+              quality: 'high',
+              onComplete: (result) => {
+                if (result.success && result.imageData) {
+                  const dataURL = imageDataToDataURL(
+                    result.imageData,
+                    getFileType(image.file),
+                    1.0 // Maximum quality
                   )
-                );
-              } else {
-                console.error(`Error processing image ${image.id}:`, result.error);
-                setImages((prev: ImageFile[]) => 
-                  prev.map((img: ImageFile) => 
-                    img.id === image.id 
-                      ? { ...img, status: 'error' } 
-                      : img
+                  
+                  setImages(prev => 
+                    prev.map(img => 
+                      img.id === image.id 
+                        ? { ...img, processed: dataURL, status: 'done' } 
+                        : img
+                    )
                   )
-                );
+                  resolve()
+                } else {
+                  const errorMsg = result.error || 'Unknown error'
+                  setImages(prev => 
+                    prev.map(img => 
+                      img.id === image.id 
+                        ? { ...img, status: 'error', error: errorMsg } 
+                        : img
+                    )
+                  )
+                  reject(new Error(errorMsg))
+                }
               }
-              resolve();
-            }
-          });
-        });
-      } catch (error) {
-        console.error('Error processing image:', error);
-        setImages((prev: ImageFile[]) => 
-          prev.map((img: ImageFile) => 
-            img.id === image.id 
-              ? { ...img, status: 'error' } 
-              : img
-          )
-        );
-      }
+            })
+          })
 
-      setProgress(Math.round(((i + 1) / imagesToProcess.length) * 100));
+          processed++
+          setProgress(Math.round((processed / imagesToProcess.length) * 100))
+        } catch (err) {
+          console.error(`Error processing image ${image.id}:`, err)
+          setImages(prev => 
+            prev.map(img => 
+              img.id === image.id 
+                ? { ...img, status: 'error', error: err instanceof Error ? err.message : 'Unknown error' } 
+                : img
+            )
+          )
+        }
+      }
+    } catch (err) {
+      setError({
+        message: 'Error processing images',
+        details: err instanceof Error ? err.message : 'Unknown error'
+      })
+    } finally {
+      setProcessing(false)
     }
-    
-    setProcessing(false);
-  };
+  }
 
   // Download all processed images with original quality
   const downloadImages = async () => {
-    const zip = new JSZip();
-    const processedImages = images.filter((img: ImageFile) => img.status === 'done');
+    const processedImages = images.filter(img => img.status === 'done')
+    if (processedImages.length === 0) return
     
-    if (processedImages.length === 0) return;
-    
-    for (const img of processedImages) {
-      try {
-        const response = await fetch(img.processed!);
-        const blob = await response.blob();
-        zip.file(img.file.name, blob);
-      } catch (error) {
-        console.error('Error adding file to zip:', error);
+    try {
+      const zip = new JSZip()
+      
+      for (const img of processedImages) {
+        try {
+          const response = await fetch(img.processed!)
+          if (!response.ok) throw new Error(`Failed to fetch ${img.file.name}`)
+          
+          const blob = await response.blob()
+          zip.file(img.file.name, blob)
+        } catch (err) {
+          console.error('Error adding file to zip:', err)
+          setError({
+            message: 'Error preparing download',
+            details: `Failed to process ${img.file.name}`
+          })
+        }
       }
+      
+      const content = await zip.generateAsync({ 
+        type: 'blob',
+        compression: 'STORE' // No compression to maintain quality
+      })
+      
+      saveAs(content, 'processed-images.zip')
+      setError(null)
+    } catch (err) {
+      setError({
+        message: 'Error creating download',
+        details: err instanceof Error ? err.message : 'Unknown error'
+      })
     }
-    
-    const content = await zip.generateAsync({ 
-      type: 'blob',
-      compression: 'STORE'
-    });
-    saveAs(content, 'processed-images.zip');
-  };
+  }
 
   // Remove an image from the list
-  const removeImage = (id: string) => {
-    setImages((prev: ImageFile[]) => {
-      const filtered = prev.filter((img: ImageFile) => img.id !== id)
-      return filtered
+  const removeImage = useCallback((id: string) => {
+    setImages(prev => {
+      const imageToRemove = prev.find(img => img.id === id)
+      if (imageToRemove) {
+        URL.revokeObjectURL(imageToRemove.preview)
+        if (imageToRemove.processed) {
+          URL.revokeObjectURL(imageToRemove.processed)
+        }
+      }
+      return prev.filter(img => img.id !== id)
     })
-  }
+  }, [])
 
   // Cleanup function to revoke object URLs on unmount
   useEffect(() => {
     return () => {
-      images.forEach((image: ImageFile) => {
-        URL.revokeObjectURL(image.preview);
-        if (image.processed && image.processed.startsWith('blob:')) {
-          URL.revokeObjectURL(image.processed);
+      images.forEach(image => {
+        URL.revokeObjectURL(image.preview)
+        if (image.processed) {
+          URL.revokeObjectURL(image.processed)
         }
-      });
-    };
-  }, [images]);
+      })
+    }
+  }, [images])
 
   return (
     <div className="app-container">
@@ -189,6 +281,13 @@ function App() {
         <p><strong>⚠️ Demo Mode:</strong> This app is currently running with a simplified demonstration model. In a production environment, it would use a full AI inpainting model for better watermark removal.</p>
       </div>
 
+      {error && (
+        <div className="error-message">
+          <p>{error.message}</p>
+          {error.details && <p className="error-details">{error.details}</p>}
+        </div>
+      )}
+
       <main>
         <section className="upload-section">
           <div
@@ -200,18 +299,13 @@ function App() {
             ) : (
               <div className="upload-prompt">
                 <p>Drag & drop images here, or click to select files</p>
-                <p className="upload-info">Supports JPEG, PNG, WEBP formats</p>
+                <p className="upload-info">
+                  Supports JPEG, PNG, WEBP formats (max {MAX_FILES} files)
+                </p>
               </div>
             )}
           </div>
         </section>
-
-        {modelError && (
-          <div className="error-message">
-            <p>Error loading AI model: {modelError}</p>
-            <p>Please refresh the page to try again.</p>
-          </div>
-        )}
 
         {images.length > 0 && (
           <>
@@ -221,14 +315,14 @@ function App() {
                 disabled={processing || modelLoading || !modelLoaded || images.length === 0}
                 className="process-button"
               >
-                {modelLoading ? 'Loading model...' : processing ? 'Processing...' : 'Remove Watermarks'}
+                {modelLoading ? 'Loading model...' : processing ? `Processing (${progress}%)` : 'Remove Watermarks'}
               </button>
               <button 
                 onClick={downloadImages} 
-                disabled={!images.some((img: ImageFile) => img.status === 'done')}
+                disabled={processedCount === 0}
                 className="download-button"
               >
-                Download All
+                Download Processed Images ({processedCount})
               </button>
             </section>
 
@@ -256,13 +350,17 @@ function App() {
                     )}
                     {image.status === 'error' && (
                       <div className="error-overlay">
-                        <span>Error processing</span>
+                        <span>Error: {image.error || 'Processing failed'}</span>
                       </div>
                     )}
                   </div>
                   <div className="image-info">
                     <span className="image-name">{image.file.name}</span>
-                    <button className="remove-image" onClick={() => removeImage(image.id)}>
+                    <button 
+                      className="remove-image"
+                      onClick={() => removeImage(image.id)}
+                      title="Remove image"
+                    >
                       Remove
                     </button>
                   </div>

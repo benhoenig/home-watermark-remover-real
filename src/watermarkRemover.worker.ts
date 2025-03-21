@@ -2,6 +2,7 @@
 // It uses TensorFlow.js to perform the watermark removal operation
 
 import * as tf from '@tensorflow/tfjs';
+import '@tensorflow/tfjs-backend-webgl';
 
 // Constants for model configuration
 const MODEL_CONFIG = {
@@ -11,12 +12,19 @@ const MODEL_CONFIG = {
   MAX_DIMENSION: 4096,
   QUALITY_SETTINGS: {
     high: {
-      dil
+      dilationRate: 2,
+      filters: 64,
+      layers: 4,
+      kernelSize: 5
     }
   }
 } as const;
 
-let model: tf.LayersModel | null = null;
+interface LayersModel {
+  predict: (inputs: tf.Tensor) => tf.Tensor;
+}
+
+let model: LayersModel | null = null;
 
 // Validate image dimensions
 function validateImageDimensions(width: number, height: number): void {
@@ -26,6 +34,73 @@ function validateImageDimensions(width: number, height: number): void {
   if (width > MODEL_CONFIG.MAX_DIMENSION || height > MODEL_CONFIG.MAX_DIMENSION) {
     throw new Error(`Image dimensions must not exceed ${MODEL_CONFIG.MAX_DIMENSION}x${MODEL_CONFIG.MAX_DIMENSION} pixels`);
   }
+}
+
+// Create a more sophisticated U-Net style model for better watermark removal
+async function createModel(): Promise<LayersModel> {
+  const inputLayer = tf.input({shape: [null, null, 3]});
+  
+  // Encoder
+  const conv1 = tf.layers.conv2d({
+    filters: MODEL_CONFIG.INITIAL_FILTERS,
+    kernelSize: MODEL_CONFIG.KERNEL_SIZE,
+    padding: 'same',
+    activation: 'relu'
+  }).apply(inputLayer);
+
+  const pool1 = tf.layers.maxPooling2d({poolSize: [2, 2]}).apply(conv1);
+
+  const conv2 = tf.layers.conv2d({
+    filters: MODEL_CONFIG.INITIAL_FILTERS * 2,
+    kernelSize: MODEL_CONFIG.KERNEL_SIZE,
+    padding: 'same',
+    activation: 'relu'
+  }).apply(pool1);
+
+  const pool2 = tf.layers.maxPooling2d({poolSize: [2, 2]}).apply(conv2);
+
+  // Middle (with dilated convolutions for better context)
+  const conv3 = tf.layers.conv2d({
+    filters: MODEL_CONFIG.INITIAL_FILTERS * 4,
+    kernelSize: MODEL_CONFIG.KERNEL_SIZE,
+    padding: 'same',
+    activation: 'relu',
+    dilationRate: MODEL_CONFIG.QUALITY_SETTINGS.high.dilationRate
+  }).apply(pool2);
+
+  // Decoder with skip connections
+  const up1 = tf.layers.upSampling2d({size: [2, 2]}).apply(conv3);
+  const concat1 = tf.layers.concatenate().apply([up1, conv2]);
+  
+  const conv4 = tf.layers.conv2d({
+    filters: MODEL_CONFIG.INITIAL_FILTERS * 2,
+    kernelSize: MODEL_CONFIG.KERNEL_SIZE,
+    padding: 'same',
+    activation: 'relu'
+  }).apply(concat1);
+
+  const up2 = tf.layers.upSampling2d({size: [2, 2]}).apply(conv4);
+  const concat2 = tf.layers.concatenate().apply([up2, conv1]);
+
+  const conv5 = tf.layers.conv2d({
+    filters: MODEL_CONFIG.INITIAL_FILTERS,
+    kernelSize: MODEL_CONFIG.KERNEL_SIZE,
+    padding: 'same',
+    activation: 'relu'
+  }).apply(concat2);
+
+  // Final output with residual connection
+  const conv6 = tf.layers.conv2d({
+    filters: 3,
+    kernelSize: 1,
+    padding: 'same',
+    activation: 'sigmoid'
+  }).apply(conv5);
+
+  // Add residual connection for better detail preservation
+  const output = tf.layers.add().apply([inputLayer, conv6]);
+
+  return tf.model({inputs: inputLayer, outputs: output}) as unknown as LayersModel;
 }
 
 // Handle messages from the main thread
@@ -38,49 +113,8 @@ self.addEventListener('message', async (e: MessageEvent) => {
         await tf.ready();
         await tf.setBackend('webgl');
         
-        // Create a more sophisticated model architecture
-        const inputLayer = tf.layers.input({shape: [null, null, 3]});
-        
-        // Encoder
-        const conv1 = tf.layers.conv2d({
-          filters: MODEL_CONFIG.INITIAL_FILTERS,
-          kernelSize: MODEL_CONFIG.KERNEL_SIZE,
-          padding: 'same',
-          activation: 'relu'
-        }).apply(inputLayer);
-        
-        const conv2 = tf.layers.conv2d({
-          filters: MODEL_CONFIG.INITIAL_FILTERS * 2,
-          kernelSize: MODEL_CONFIG.KERNEL_SIZE,
-          padding: 'same',
-          activation: 'relu'
-        }).apply(conv1);
-        
-        // Feature processing
-        const conv3 = tf.layers.conv2d({
-          filters: MODEL_CONFIG.INITIAL_FILTERS * 2,
-          kernelSize: MODEL_CONFIG.KERNEL_SIZE,
-          padding: 'same',
-          activation: 'relu',
-          dilation: 2
-        }).apply(conv2);
-        
-        // Decoder
-        const conv4 = tf.layers.conv2d({
-          filters: MODEL_CONFIG.INITIAL_FILTERS,
-          kernelSize: MODEL_CONFIG.KERNEL_SIZE,
-          padding: 'same',
-          activation: 'relu'
-        }).apply(conv3);
-        
-        const output = tf.layers.conv2d({
-          filters: 3,
-          kernelSize: 1,
-          padding: 'same',
-          activation: 'sigmoid'
-        }).apply(conv4);
-        
-        model = tf.model({inputs: inputLayer, outputs: output as tf.SymbolicTensor});
+        // Create enhanced model
+        model = await createModel();
         
         // Enable memory management optimizations
         tf.enableProdMode();
@@ -136,7 +170,7 @@ self.addEventListener('message', async (e: MessageEvent) => {
 // Function to process an image and remove watermarks
 async function processImage(imageData: ImageData): Promise<ImageData> {
   return new Promise(async (resolve, reject) => {
-    const tensors: tf.Tensor[] = [];
+    const tensors: any[] = [];
     
     try {
       if (!model) {
@@ -144,45 +178,45 @@ async function processImage(imageData: ImageData): Promise<ImageData> {
         return;
       }
 
-      // Convert ImageData to a tensor and track it
+      // Convert ImageData to tensor with tracking
       const tensor = tf.browser.fromPixels(imageData);
       tensors.push(tensor);
       
-      // Normalize the tensor
+      // Normalize and prepare input
       const normalized = tensor.div(255);
       tensors.push(normalized);
       
-      // Add batch dimension
       const batched = normalized.expandDims(0);
       tensors.push(batched);
       
-      // Run inference with memory optimization
+      // Process with enhanced quality
       const result = tf.tidy(() => {
-        return model!.predict(batched) as tf.Tensor;
+        // Apply model for watermark removal
+        const predicted = model!.predict(batched);
+        
+        // Post-processing for smoother results
+        return tf.clipByValue(predicted, 0, 1);
       });
       tensors.push(result);
       
-      // Post-process the result
+      // Convert back to image data
       const processedTensor = result.mul(255).squeeze();
       tensors.push(processedTensor);
       
-      // Get dimensions
-      const [height, width] = processedTensor.shape as [number, number, number];
-      
-      // Create output ImageData
-      const processedImageData = new ImageData(width, height);
-      
-      // Convert to pixels efficiently
-      const pixels = await tf.browser.toPixels(processedTensor as tf.Tensor3D);
-      processedImageData.data.set(pixels);
+      const [height, width] = processedTensor.shape;
+      const processedImageData = new ImageData(
+        new Uint8ClampedArray(await processedTensor.data()),
+        width,
+        height
+      );
       
       resolve(processedImageData);
     } catch (error) {
       reject(error);
     } finally {
-      // Clean up all tensors
+      // Clean up tensors
       tensors.forEach(t => {
-        if (t && !t.isDisposed) {
+        if (t && typeof t.dispose === 'function') {
           t.dispose();
         }
       });
