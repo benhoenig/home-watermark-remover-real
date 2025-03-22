@@ -2,16 +2,7 @@
  * Utility functions for image processing
  */
 
-// Constants for image processing
-const IMAGE_CONFIG = {
-  MAX_DIMENSION: 4096,
-  MIN_DIMENSION: 32,
-  DEFAULT_QUALITY: 0.8,
-  SUPPORTED_TYPES: ['image/jpeg', 'image/png', 'image/webp'] as const,
-  WEBGL_MAX_DIMENSION: 16384,
-  CHUNK_SIZE: 4096, // Size for progressive loading
-  MAX_MEMORY_USAGE: 1024 * 1024 * 1024 // 1GB max memory usage
-} as const;
+import { IMAGE_CONFIG } from './constants';
 
 type SupportedImageType = typeof IMAGE_CONFIG.SUPPORTED_TYPES[number];
 
@@ -24,6 +15,7 @@ interface ProcessingOptions {
   quality?: number;
   preserveMetadata?: boolean;
   progressive?: boolean;
+  maxDimension?: number;
 }
 
 /**
@@ -164,99 +156,86 @@ export const fileToImage = async (file: File): Promise<HTMLImageElement> => {
 };
 
 /**
- * Creates a canvas context with optimal settings
- * @param canvas The canvas element
- * @returns The 2D rendering context
+ * Calculate optimal dimensions while maintaining aspect ratio
  */
-const createOptimalContext = (canvas: HTMLCanvasElement): CanvasRenderingContext2D => {
-  const ctx = canvas.getContext('2d', {
-    willReadFrequently: true,
-    alpha: true,
-    desynchronized: true, // Improve performance when available
-  });
+function calculateOptimalDimensions(width: number, height: number, maxDimension: number): { width: number; height: number } {
+  const aspectRatio = width / height;
+  let newWidth = width;
+  let newHeight = height;
 
-  if (!ctx) {
-    throw new Error('Could not get 2D context from canvas');
-  }
-
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
-
-  return ctx;
-};
-
-/**
- * Resizes an image while maintaining aspect ratio with enhanced quality
- * @param img The image element to resize
- * @param maxDimension The maximum allowed dimension
- * @returns A new canvas with the resized image
- */
-const resizeImage = (img: HTMLImageElement, maxDimension: number): HTMLCanvasElement => {
-  let width = img.width;
-  let height = img.height;
-
-  // Calculate new dimensions while maintaining aspect ratio
   if (width > height) {
     if (width > maxDimension) {
-      height = Math.round((height * maxDimension) / width);
-      width = maxDimension;
+      newWidth = maxDimension;
+      newHeight = Math.round(maxDimension / aspectRatio);
     }
   } else {
     if (height > maxDimension) {
-      width = Math.round((width * maxDimension) / height);
-      height = maxDimension;
+      newHeight = maxDimension;
+      newWidth = Math.round(maxDimension * aspectRatio);
     }
   }
 
-  // Create temporary canvases for multi-step resizing
-  const tempCanvas1 = document.createElement('canvas');
-  const tempCanvas2 = document.createElement('canvas');
-  
-  // Step 1: Resize to intermediate size if needed (reduces artifacts)
-  const useStepResize = width < img.width / 2 || height < img.height / 2;
-  if (useStepResize) {
-    const stepWidth = Math.round(img.width / 2);
-    const stepHeight = Math.round(img.height / 2);
-    
-    tempCanvas1.width = stepWidth;
-    tempCanvas1.height = stepHeight;
-    const ctx1 = createOptimalContext(tempCanvas1);
-    ctx1.drawImage(img, 0, 0, stepWidth, stepHeight);
-    
-    // Step 2: Resize to final size
-    tempCanvas2.width = width;
-    tempCanvas2.height = height;
-    const ctx2 = createOptimalContext(tempCanvas2);
-    ctx2.drawImage(tempCanvas1, 0, 0, width, height);
-  } else {
-    // Single step resize for smaller adjustments
-    tempCanvas2.width = width;
-    tempCanvas2.height = height;
-    const ctx2 = createOptimalContext(tempCanvas2);
-    ctx2.drawImage(img, 0, 0, width, height);
+  // Ensure dimensions are even numbers for better GPU processing
+  newWidth = Math.floor(newWidth / 2) * 2;
+  newHeight = Math.floor(newHeight / 2) * 2;
+
+  return { width: newWidth, height: newHeight };
+}
+
+/**
+ * Creates an optimized canvas context
+ */
+function createOptimizedContext(canvas: HTMLCanvasElement): CanvasRenderingContext2D {
+  const ctx = canvas.getContext('2d', {
+    willReadFrequently: true,
+    alpha: true,
+    desynchronized: true
+  });
+
+  if (!ctx) {
+    throw new Error('Failed to create canvas context');
   }
 
-  // Clean up
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = IMAGE_CONFIG.RESIZE_QUALITY;
+
+  return ctx;
+}
+
+/**
+ * Resizes an image using a multi-step approach for better quality
+ */
+function resizeImageWithSteps(img: HTMLImageElement, targetWidth: number, targetHeight: number): ImageData {
+  // Calculate intermediate size for two-step resizing
+  const intermediateWidth = Math.min(img.width, targetWidth * 2);
+  const intermediateHeight = Math.min(img.height, targetHeight * 2);
+
+  // Step 1: Create intermediate canvas
+  const intermediateCanvas = document.createElement('canvas');
+  intermediateCanvas.width = intermediateWidth;
+  intermediateCanvas.height = intermediateHeight;
+  const intermediateCtx = createOptimizedContext(intermediateCanvas);
+  intermediateCtx.drawImage(img, 0, 0, intermediateWidth, intermediateHeight);
+
+  // Step 2: Create final canvas
   const finalCanvas = document.createElement('canvas');
-  finalCanvas.width = width;
-  finalCanvas.height = height;
-  const finalCtx = createOptimalContext(finalCanvas);
-  finalCtx.drawImage(tempCanvas2, 0, 0);
+  finalCanvas.width = targetWidth;
+  finalCanvas.height = targetHeight;
+  const finalCtx = createOptimizedContext(finalCanvas);
+  finalCtx.drawImage(intermediateCanvas, 0, 0, targetWidth, targetHeight);
 
-  // Clean up temporary canvases
-  tempCanvas1.width = 0;
-  tempCanvas1.height = 0;
-  tempCanvas2.width = 0;
-  tempCanvas2.height = 0;
+  // Get final image data
+  const imageData = finalCtx.getImageData(0, 0, targetWidth, targetHeight);
 
-  return finalCanvas;
-};
+  // Clean up
+  intermediateCanvas.width = 0;
+  intermediateCanvas.height = 0;
+
+  return imageData;
+}
 
 /**
  * Processes a file directly to get its ImageData with enhanced error handling and quality
- * @param file The image file to process
- * @param options Processing options
- * @returns A promise that resolves to ImageData
  */
 export const fileToImageData = async (
   file: File,
@@ -265,33 +244,30 @@ export const fileToImageData = async (
   try {
     const img = await fileToImage(file);
     
-    // Check if image needs resizing
-    const needsWebGLResize = img.width > IMAGE_CONFIG.WEBGL_MAX_DIMENSION || 
-                            img.height > IMAGE_CONFIG.WEBGL_MAX_DIMENSION;
-    const needsModelResize = img.width > IMAGE_CONFIG.MAX_DIMENSION || 
-                            img.height > IMAGE_CONFIG.MAX_DIMENSION;
+    // Use provided maxDimension or default
+    const maxDim = options.maxDimension || IMAGE_CONFIG.WEBGL_MAX_DIMENSION / 2;
     
-    if (needsWebGLResize || needsModelResize) {
-      const maxDimension = needsWebGLResize ? 
-        IMAGE_CONFIG.WEBGL_MAX_DIMENSION : 
-        IMAGE_CONFIG.MAX_DIMENSION;
+    // Calculate optimal dimensions
+    const { width: targetWidth, height: targetHeight } = calculateOptimalDimensions(
+      img.width,
+      img.height,
+      maxDim
+    );
+
+    // If image needs resizing
+    if (targetWidth !== img.width || targetHeight !== img.height) {
+      console.log(`Resizing image from ${img.width}x${img.height} to ${targetWidth}x${targetHeight}`);
+      const resizedImageData = resizeImageWithSteps(img, targetWidth, targetHeight);
       
-      console.log(`Resizing image from ${img.width}x${img.height} to fit within ${maxDimension}x${maxDimension}`);
-      
-      const resizedCanvas = resizeImage(img, maxDimension);
-      const ctx = createOptimalContext(resizedCanvas);
-      
-      // Clean up original image
+      // Clean up
       URL.revokeObjectURL(img.src);
       
-      return ctx.getImageData(0, 0, resizedCanvas.width, resizedCanvas.height);
+      return resizedImageData;
     }
 
+    // If no resizing needed, convert directly
     const result = imageToImageData(img);
-    
-    // Clean up
     URL.revokeObjectURL(img.src);
-    
     return result;
   } catch (error) {
     throw new Error(`Failed to process image: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -330,7 +306,7 @@ export const imageToImageData = (img: HTMLImageElement): ImageData => {
  */
 export const imageDataToDataURL = (
   imageData: ImageData,
-  type: SupportedImageType = 'image/png',
+  type: SupportedImageType | string = 'image/png',
   quality: number = 1.0 // Default to maximum quality
 ): string => {
   const canvas = document.createElement('canvas');
@@ -351,7 +327,19 @@ export const imageDataToDataURL = (
   ctx.imageSmoothingQuality = 'high';
   
   ctx.putImageData(imageData, 0, 0);
-  return canvas.toDataURL(type, quality);
+  
+  // Default to PNG if type is undefined
+  const safeType = type || 'image/png';
+  
+  // Ensure it's a supported type
+  try {
+    validateImageType(safeType);
+  } catch (e) {
+    console.warn(`Invalid image type: ${safeType}, defaulting to PNG`);
+    return canvas.toDataURL('image/png', quality);
+  }
+  
+  return canvas.toDataURL(safeType, quality);
 };
 
 /**
@@ -366,12 +354,28 @@ export const dataURLToBlob = (dataURL: string): Blob => {
   }
   
   const mimeMatch = arr[0].match(/:(.*?);/);
-  if (!mimeMatch) {
-    throw new Error('Invalid data URL format: missing MIME type');
+  if (!mimeMatch || !mimeMatch[1]) {
+    console.warn('Missing MIME type in data URL, using image/png');
+    const bstr = atob(arr[1]);
+    const n = bstr.length;
+    const u8arr = new Uint8Array(n);
+    
+    for (let i = 0; i < n; i++) {
+      u8arr[i] = bstr.charCodeAt(i);
+    }
+    
+    return new Blob([u8arr], { type: 'image/png' });
   }
   
-  const mime = mimeMatch[1];
-  validateImageType(mime);
+  let mime = mimeMatch[1];
+  
+  // If mime type is undefined or not supported, default to PNG
+  try {
+    validateImageType(mime);
+  } catch (e) {
+    console.warn(`Invalid MIME type (${mime}), defaulting to PNG`);
+    mime = 'image/png';
+  }
   
   const bstr = atob(arr[1]);
   const n = bstr.length;
@@ -394,7 +398,44 @@ export const getFileType = (file: File): SupportedImageType => {
     throw new Error('Invalid input: expected File object');
   }
   
+  // Default to PNG if no type is specified
   const type = file.type || 'image/png';
   validateImageType(type);
   return type as SupportedImageType;
+};
+
+/**
+ * Check if an image will exceed WebGL limits and needs special handling
+ * @param width Image width
+ * @param height Image height
+ * @returns True if image needs special handling
+ */
+export const requiresSpecialHandling = (width: number, height: number): boolean => {
+  // Check for very large dimensions
+  if (width > IMAGE_CONFIG.WEBGL_MAX_DIMENSION / 2 || height > IMAGE_CONFIG.WEBGL_MAX_DIMENSION / 2) {
+    return true;
+  }
+  
+  // Check for excessive memory usage
+  const memoryEstimate = width * height * 4; // RGBA bytes
+  if (memoryEstimate > IMAGE_CONFIG.MAX_MEMORY_USAGE / 2) {
+    return true;
+  }
+  
+  // Check if texture would exceed limits (width/height must be even)
+  if (width * height > (IMAGE_CONFIG.WEBGL_MAX_DIMENSION / 2) ** 2) {
+    return true;
+  }
+  
+  return false;
+};
+
+/**
+ * Get safe dimensions for WebGL processing
+ * @param width Original width
+ * @param height Original height
+ * @returns Safe dimensions for processing
+ */
+export const getSafeDimensions = (width: number, height: number): ImageDimensions => {
+  return calculateOptimalDimensions(width, height, IMAGE_CONFIG.WEBGL_MAX_DIMENSION / 4);
 }; 

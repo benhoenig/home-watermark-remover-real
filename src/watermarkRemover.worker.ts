@@ -14,6 +14,20 @@ const MODEL_CONFIG = {
   BATCH_SIZE: 1,
   MEMORY_LIMIT: 1024 * 1024 * 1024, // 1GB
   QUALITY_SETTINGS: {
+    low: {
+      dilationRate: 1,
+      filters: 32,
+      layers: 2,
+      kernelSize: 3,
+      dropoutRate: 0.05
+    },
+    medium: {
+      dilationRate: 1,
+      filters: 48,
+      layers: 3,
+      kernelSize: 4,
+      dropoutRate: 0.08
+    },
     high: {
       dilationRate: 2,
       filters: 64,
@@ -24,61 +38,76 @@ const MODEL_CONFIG = {
   }
 } as const;
 
+type ModelQuality = keyof typeof MODEL_CONFIG.QUALITY_SETTINGS;
+
 interface LayersModel extends TFLayersModel {
   predict: (inputs: Tensor) => Tensor;
 }
 
 let model: LayersModel | null = null;
 
-// Validate image dimensions and memory usage
-function validateImageDimensions(width: number, height: number): void {
-  if (!Number.isFinite(width) || !Number.isFinite(height)) {
-    throw new Error('Invalid image dimensions: width and height must be finite numbers');
-  }
-  if (width < MODEL_CONFIG.MIN_DIMENSION || height < MODEL_CONFIG.MIN_DIMENSION) {
-    throw new Error(`Image dimensions must be at least ${MODEL_CONFIG.MIN_DIMENSION}x${MODEL_CONFIG.MIN_DIMENSION} pixels`);
-  }
-  if (width > MODEL_CONFIG.MAX_DIMENSION || height > MODEL_CONFIG.MAX_DIMENSION) {
-    throw new Error(`Image dimensions must not exceed ${MODEL_CONFIG.MAX_DIMENSION}x${MODEL_CONFIG.MAX_DIMENSION} pixels`);
-  }
-
-  // Check memory requirements (4 bytes per pixel * channels)
-  const memoryRequired = width * height * 4 * 3; // Include input, intermediate, and output tensors
-  if (memoryRequired > MODEL_CONFIG.MEMORY_LIMIT) {
-    throw new Error('Image requires too much memory to process');
+// Configure TensorFlow.js for optimal performance
+async function configureEnvironment(): Promise<void> {
+  await tf.ready();
+  await tf.setBackend('webgl');
+  
+  // Enable memory management optimizations
+  tf.enableProdMode();
+  
+  // Configure WebGL for better performance
+  try {
+    // Access WebGL context safely using feature detection
+    const backend = tf.getBackend();
+    if (backend === 'webgl') {
+      // Safely access backend through any to avoid TypeScript errors
+      const tfAny = tf as any;
+      if (tfAny.backend && typeof tfAny.backend === 'function') {
+        const webglBackend = tfAny.backend();
+        if (webglBackend && webglBackend.getGPGPUContext) {
+          const gl = webglBackend.getGPGPUContext().gl;
+          gl.getExtension('OES_texture_float');
+          gl.getExtension('WEBGL_color_buffer_float');
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('WebGL extensions not available:', e);
   }
 }
 
 // Create a more sophisticated U-Net style model for better watermark removal
-async function createModel(): Promise<LayersModel> {
+async function createModel(quality: ModelQuality = 'medium'): Promise<LayersModel> {
+  const config = MODEL_CONFIG.QUALITY_SETTINGS[quality];
+  console.log(`Creating model with ${quality} quality settings:`, config);
+  
   const inputLayer = tf.input({shape: [null, null, 3]});
+  
+  const convConfig = {
+    kernelSize: config.kernelSize,
+    padding: 'same' as const,
+    activation: 'relu'
+  };
   
   // Encoder with improved architecture
   const conv1 = tf.layers.conv2d({
-    filters: MODEL_CONFIG.INITIAL_FILTERS,
-    kernelSize: MODEL_CONFIG.KERNEL_SIZE,
-    padding: 'same',
-    activation: 'relu'
+    ...convConfig,
+    filters: config.filters
   }).apply(inputLayer);
 
   const pool1 = tf.layers.maxPooling2d({poolSize: [2, 2]}).apply(conv1);
 
   const conv2 = tf.layers.conv2d({
-    filters: MODEL_CONFIG.INITIAL_FILTERS * 2,
-    kernelSize: MODEL_CONFIG.KERNEL_SIZE,
-    padding: 'same',
-    activation: 'relu'
+    ...convConfig,
+    filters: config.filters * 1.5
   }).apply(pool1);
 
   const pool2 = tf.layers.maxPooling2d({poolSize: [2, 2]}).apply(conv2);
 
   // Middle with dilated convolutions
   const conv3 = tf.layers.conv2d({
-    filters: MODEL_CONFIG.INITIAL_FILTERS * 4,
-    kernelSize: MODEL_CONFIG.KERNEL_SIZE,
-    padding: 'same',
-    activation: 'relu',
-    dilationRate: MODEL_CONFIG.QUALITY_SETTINGS.high.dilationRate
+    ...convConfig,
+    filters: config.filters * 2,
+    dilationRate: config.dilationRate
   }).apply(pool2);
 
   // Decoder with skip connections
@@ -86,27 +115,23 @@ async function createModel(): Promise<LayersModel> {
   const concat1 = tf.layers.concatenate().apply([up1, conv2]);
   
   const conv4 = tf.layers.conv2d({
-    filters: MODEL_CONFIG.INITIAL_FILTERS * 2,
-    kernelSize: MODEL_CONFIG.KERNEL_SIZE,
-    padding: 'same',
-    activation: 'relu'
+    ...convConfig,
+    filters: config.filters * 1.5
   }).apply(concat1);
 
   const up2 = tf.layers.upSampling2d({size: [2, 2]}).apply(conv4);
   const concat2 = tf.layers.concatenate().apply([up2, conv1]);
 
   const conv5 = tf.layers.conv2d({
-    filters: MODEL_CONFIG.INITIAL_FILTERS,
-    kernelSize: MODEL_CONFIG.KERNEL_SIZE,
-    padding: 'same',
-    activation: 'relu'
+    ...convConfig,
+    filters: config.filters
   }).apply(concat2);
 
   // Final output with residual connection
   const conv6 = tf.layers.conv2d({
     filters: 3,
     kernelSize: 1,
-    padding: 'same',
+    padding: 'same' as const,
     activation: 'sigmoid'
   }).apply(conv5);
 
@@ -118,22 +143,13 @@ async function createModel(): Promise<LayersModel> {
 
 // Handle messages from the main thread with enhanced error handling
 self.addEventListener('message', async (e: MessageEvent) => {
-  const { type, imageData, id } = e.data;
+  const { type, imageData, id, quality = 'medium' } = e.data;
 
   switch (type) {
     case 'LOAD_MODEL':
       try {
-        // Configure TensorFlow.js
-        await tf.ready();
-        await tf.setBackend('webgl');
-        
-        // Create enhanced model
-        model = await createModel();
-        
-        // Enable optimizations
-        tf.enableProdMode();
-        tf.engine().startScope(); // Start memory scope
-        
+        await configureEnvironment();
+        model = await createModel(quality);
         self.postMessage({ type: 'MODEL_LOADED', success: true });
       } catch (error) {
         console.error('Error loading model in worker:', error);
@@ -157,9 +173,7 @@ self.addEventListener('message', async (e: MessageEvent) => {
       }
 
       try {
-        validateImageDimensions(imageData.width, imageData.height);
-        const processedImageData = await processImage(imageData);
-        
+        const processedImageData = await processImage(imageData, quality as ModelQuality);
         self.postMessage({ 
           type: 'PROCESSING_COMPLETE', 
           success: true, 
@@ -183,7 +197,7 @@ self.addEventListener('message', async (e: MessageEvent) => {
 });
 
 // Function to process an image and remove watermarks with enhanced memory management
-async function processImage(imageData: ImageData): Promise<ImageData> {
+async function processImage(imageData: ImageData, quality: ModelQuality = 'medium'): Promise<ImageData> {
   return new Promise(async (resolve, reject) => {
     const tensors: Tensor[] = [];
     const startTime = performance.now();
@@ -194,43 +208,39 @@ async function processImage(imageData: ImageData): Promise<ImageData> {
         return;
       }
 
-      // Start a new memory scope
-      tf.engine().startScope();
+      console.log(`Processing image with ${quality} quality (${imageData.width}x${imageData.height})`);
 
       // Convert ImageData to tensor with tracking
-      const tensor = tf.browser.fromPixels(imageData);
+      const tensor = tf.tidy(() => {
+        const t = tf.browser.fromPixels(imageData);
+        // Use tensor methods and avoid linter errors through proper casting
+        return tf.tidy(() => t.div(255));
+      });
       tensors.push(tensor);
-      
-      // Normalize and prepare input with enhanced precision
-      const normalized = tensor.toFloat().div(255);
-      tensors.push(normalized);
-      
-      const batched = normalized.expandDims(0);
-      tensors.push(batched);
       
       // Process with enhanced quality and memory optimization
       const result = tf.tidy(() => {
-        // Apply model with error checking
+        const batched = tensor.expandDims(0);
         const predicted = model!.predict(batched);
+        
         if (!predicted) {
           throw new Error('Model prediction failed');
         }
         
-        // Post-processing for smoother results
-        return tf.clipByValue(predicted, 0, 1);
+        return tf.clipByValue(predicted.squeeze(), 0, 1);
       });
       tensors.push(result);
       
       // Convert back to image data with enhanced precision
-      const processedTensor = result.mul(255).squeeze();
+      const processedTensor = result.mul(255);
       tensors.push(processedTensor);
       
       const [height, width] = processedTensor.shape;
       const processedData = await processedTensor.data();
       
-      // Ensure width and height are defined before creating ImageData
-      if (typeof width !== 'number' || typeof height !== 'number') {
-        throw new Error('Invalid tensor dimensions');
+      // Ensure dimensions are valid
+      if (!width || !height || width <= 0 || height <= 0) {
+        throw new Error('Invalid output dimensions');
       }
       
       const processedImageData = new ImageData(
@@ -247,17 +257,17 @@ async function processImage(imageData: ImageData): Promise<ImageData> {
       // Clean up tensors
       tensors.forEach(t => {
         if (t && !t.isDisposed) {
-          t.dispose();
+          try {
+            t.dispose();
+          } catch (e) {
+            console.warn('Error disposing tensor:', e);
+          }
         }
       });
       
-      // End memory scope
-      tf.engine().endScope();
-      
       // Force garbage collection if needed
-      if (tf.memory().numTensors > 100) { // Threshold for cleanup
+      if (tf.memory().numTensors > 100) {
         tf.disposeVariables();
-        tf.engine().purgeLocalTensors();
       }
     }
   });

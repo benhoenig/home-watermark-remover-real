@@ -4,7 +4,17 @@ import JSZip from 'jszip'
 import { saveAs } from 'file-saver'
 import './App.css'
 import useWatermarkRemover from './hooks/useWatermarkRemover'
-import { fileToImageData, imageDataToDataURL, getFileType, validateImageType } from './utils/imageUtils'
+import { 
+  fileToImageData, 
+  imageDataToDataURL, 
+  getFileType, 
+  validateImageType,
+  getImageDimensions,
+  requiresSpecialHandling
+} from './utils/imageUtils'
+
+// Import IMAGE_CONFIG for resizing logic
+import { IMAGE_CONFIG } from './utils/constants'
 
 // Constants
 const MAX_FILES = 50
@@ -144,43 +154,107 @@ function App() {
             )
           )
 
-          // Process image
-          const imageData = await fileToImageData(image.file)
-          await new Promise<void>((resolve, reject) => {
-            processImage({
-              id: image.id,
-              imageData,
-              quality: 'high',
-              onComplete: (result) => {
-                if (result.success && result.imageData) {
-                  const dataURL = imageDataToDataURL(
-                    result.imageData,
-                    getFileType(image.file),
-                    1.0 // Maximum quality
-                  )
-                  
-                  setImages(prev => 
-                    prev.map(img => 
-                      img.id === image.id 
-                        ? { ...img, processed: dataURL, status: 'done' } 
-                        : img
+          // Process image with enhanced error handling for large images
+          try {
+            // Get image dimensions first
+            const dimensions = await getImageDimensions(image.file)
+            
+            // Check if image needs special handling due to size
+            if (requiresSpecialHandling(dimensions.width, dimensions.height)) {
+              console.log(`Large image detected (${dimensions.width}x${dimensions.height}), using optimized processing`)
+            }
+            
+            // Process with appropriate settings
+            const imageData = await fileToImageData(image.file)
+            
+            await new Promise<void>((resolve, reject) => {
+              processImage({
+                id: image.id,
+                imageData,
+                quality: 'high',
+                onComplete: (result) => {
+                  if (result.success && result.imageData) {
+                    const dataURL = imageDataToDataURL(
+                      result.imageData,
+                      getFileType(image.file),
+                      1.0 // Maximum quality
                     )
-                  )
-                  resolve()
-                } else {
-                  const errorMsg = result.error || 'Unknown error'
-                  setImages(prev => 
-                    prev.map(img => 
-                      img.id === image.id 
-                        ? { ...img, status: 'error', error: errorMsg } 
-                        : img
+                    
+                    setImages(prev => 
+                      prev.map(img => 
+                        img.id === image.id 
+                          ? { ...img, processed: dataURL, status: 'done' } 
+                          : img
+                      )
                     )
-                  )
-                  reject(new Error(errorMsg))
+                    resolve()
+                  } else {
+                    const errorMsg = result.error || 'Unknown error'
+                    setImages(prev => 
+                      prev.map(img => 
+                        img.id === image.id 
+                          ? { ...img, status: 'error', error: errorMsg } 
+                          : img
+                      )
+                    )
+                    reject(new Error(errorMsg))
+                  }
                 }
-              }
+              })
             })
-          })
+          } catch (err) {
+            // Handle WebGL texture size errors specifically
+            const errorMessage = err instanceof Error ? err.message : 'Unknown error'
+            if (errorMessage.includes('texture size') || errorMessage.includes('WebGL') || errorMessage.includes('memory')) {
+              console.error('WebGL texture size error - image is too large:', errorMessage)
+              
+              // Try to recover by processing at lower quality and size
+              try {
+                console.log('Attempting recovery with reduced size...')
+                
+                // Get smaller version of the image
+                const smallerImageData = await fileToImageData(image.file, { 
+                  quality: 0.7, 
+                  maxDimension: IMAGE_CONFIG.WEBGL_MAX_DIMENSION / 4 
+                })
+                
+                await new Promise<void>((resolve, reject) => {
+                  processImage({
+                    id: image.id,
+                    imageData: smallerImageData,
+                    quality: 'medium', // Use medium quality for larger images
+                    onComplete: (result) => {
+                      if (result.success && result.imageData) {
+                        const dataURL = imageDataToDataURL(
+                          result.imageData,
+                          getFileType(image.file),
+                          0.9 // Slightly reduced quality
+                        )
+                        
+                        setImages(prev => 
+                          prev.map(img => 
+                            img.id === image.id 
+                              ? { ...img, processed: dataURL, status: 'done' } 
+                              : img
+                          )
+                        )
+                        resolve()
+                      } else {
+                        reject(new Error(result.error || 'Recovery processing failed'))
+                      }
+                    }
+                  })
+                })
+              } catch (recoveryErr) {
+                throw new Error(`Failed to process large image: ${
+                  recoveryErr instanceof Error ? recoveryErr.message : 'Unknown error'
+                }`)
+              }
+            } else {
+              // Re-throw other errors
+              throw err
+            }
+          }
 
           processed++
           setProgress(Math.round((processed / imagesToProcess.length) * 100))

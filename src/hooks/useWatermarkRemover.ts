@@ -1,5 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 
+// Quality settings type (keep in sync with worker)
+export type WatermarkRemovalQuality = 'low' | 'medium' | 'high';
+
 // Types for hook options and results
 interface WatermarkRemoverOptions {
   onModelLoaded?: () => void;
@@ -10,6 +13,7 @@ interface WatermarkRemoverOptions {
 interface ProcessImageOptions {
   id: string;
   imageData: ImageData;
+  quality?: WatermarkRemovalQuality;
   onComplete?: (result: ProcessImageResult) => void;
 }
 
@@ -117,7 +121,7 @@ export function useWatermarkRemover(options?: WatermarkRemoverOptions) {
 
   // Process image function with improved error handling and type safety
   const processImage = useCallback(
-    ({ id, imageData, onComplete }: ProcessImageOptions) => {
+    ({ id, imageData, quality = 'medium', onComplete }: ProcessImageOptions) => {
       if (!worker || !modelLoaded) {
         const errorMessage = !worker 
           ? 'Worker not initialized' 
@@ -154,7 +158,8 @@ export function useWatermarkRemover(options?: WatermarkRemoverOptions) {
       worker.postMessage({
         type: 'PROCESS_IMAGE',
         id,
-        imageData
+        imageData,
+        quality
       });
     },
     [worker, modelLoaded]
