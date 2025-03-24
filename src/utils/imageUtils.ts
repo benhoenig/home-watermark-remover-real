@@ -347,46 +347,25 @@ export const imageDataToDataURL = (
  * @param dataURL The data URL to convert
  * @returns A Blob representing the image
  */
-export const dataURLToBlob = (dataURL: string): Blob => {
+export function dataURLToBlob(dataURL: string): Blob {
   const arr = dataURL.split(',');
-  if (arr.length < 2) {
+  if (arr.length !== 2) {
     throw new Error('Invalid data URL format');
   }
   
   const mimeMatch = arr[0].match(/:(.*?);/);
-  if (!mimeMatch || !mimeMatch[1]) {
-    console.warn('Missing MIME type in data URL, using image/png');
-    const bstr = atob(arr[1]);
-    const n = bstr.length;
-    const u8arr = new Uint8Array(n);
-    
-    for (let i = 0; i < n; i++) {
-      u8arr[i] = bstr.charCodeAt(i);
-    }
-    
-    return new Blob([u8arr], { type: 'image/png' });
-  }
-  
-  let mime = mimeMatch[1];
-  
-  // If mime type is undefined or not supported, default to PNG
-  try {
-    validateImageType(mime);
-  } catch (e) {
-    console.warn(`Invalid MIME type (${mime}), defaulting to PNG`);
-    mime = 'image/png';
-  }
+  const mime = mimeMatch ? mimeMatch[1] : 'image/png';
   
   const bstr = atob(arr[1]);
-  const n = bstr.length;
+  let n = bstr.length;
   const u8arr = new Uint8Array(n);
   
-  for (let i = 0; i < n; i++) {
-    u8arr[i] = bstr.charCodeAt(i);
+  while (n--) {
+    u8arr[n] = bstr.charCodeAt(n);
   }
   
   return new Blob([u8arr], { type: mime });
-};
+}
 
 /**
  * Get the original file type (mime type) from a File object

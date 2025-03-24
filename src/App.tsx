@@ -75,7 +75,7 @@ function App() {
     // Handle rejected files
     if (rejectedFiles.length > 0) {
       const errors = rejectedFiles.map(rejection => 
-        `${rejection.file.name}: ${rejection.errors[0].message}`
+        `${rejection.file.name}: ${rejection.errors?.[0]?.message || 'Unknown error'}`
       )
       setError({ 
         message: 'Some files were rejected', 

@@ -57,7 +57,7 @@ async function configureEnvironment(): Promise<void> {
   // Configure WebGL for better performance
   try {
     // Access WebGL context safely using feature detection
-    const backend = tf.getBackend();
+    const backend = await tf.getBackend();
     if (backend === 'webgl') {
       // Safely access backend through any to avoid TypeScript errors
       const tfAny = tf as any;
